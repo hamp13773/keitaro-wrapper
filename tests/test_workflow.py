@@ -219,3 +219,18 @@ def test_prefix_and_flow_ownership_are_enforced(client, environment):
         == 404
     )
     assert client.get("/api/campaigns/1/streams/1").status_code == 422
+
+
+def test_live_campaign_links_to_its_admin_page(environment):
+    settings, demo = environment
+    live = Settings(
+        keitaro_mode="live",
+        keitaro_url="https://tracker.example.test/",
+        keitaro_api_key="example-token",
+        database_url=settings.database_url,
+    )
+    with TestClient(create_app(live, httpx.MockTransport(demo.handle))) as client:
+        detail = ok(client.get("/api/campaigns/1"))
+    assert (
+        detail["campaign"]["admin_url"] == "https://tracker.example.test/admin/#!/campaign/1/main"
+    )

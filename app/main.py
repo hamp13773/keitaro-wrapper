@@ -95,7 +95,7 @@ def create_app(
     def get_campaign(campaign_id: ResourceId):
         campaign = campaign_summary(tracker.campaign(campaign_id))
         if settings.keitaro_mode == "live":
-            campaign["admin_url"] = f"{settings.keitaro_url}/admin/#!/campaigns/{campaign_id}"
+            campaign["admin_url"] = f"{settings.keitaro_url}/admin/#!/campaign/{campaign_id}/main"
         streams = [
             stream_summary(row)
             for row in tracker.streams(campaign_id)

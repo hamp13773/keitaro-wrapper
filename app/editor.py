@@ -24,6 +24,12 @@ class DraftChange(VersionInput):
         return self
 
 
+class DraftConflict(AppError):
+    def __init__(self, message: str, view: dict):
+        super().__init__(409, message)
+        self.view = view
+
+
 def live_offers(stream: dict) -> list[dict]:
     return [
         {
@@ -51,14 +57,63 @@ def visible_rows(edit: StreamEdit | None, live: list[dict]) -> list[dict]:
     return deepcopy(live)
 
 
+def draft_baseline(edit: StreamEdit, live: list[dict], current: str) -> list[dict] | None:
+    if edit.base_offers is not None:
+        return edit.base_offers
+    if edit.base == current:
+        return visible_rows(edit, live)
+    if edit.base == edit.published_signature:
+        return edit.published
+    return None
+
+
+def offer_changes(before: list[dict], after: list[dict], *, include_pins: bool) -> list[dict]:
+    fields = ("share", "state", "pinned") if include_pins else ("share", "state")
+    offer_states = [
+        {
+            row["offer_id"]: {field: row[field] for field in fields}
+            for row in snapshot
+            if not row["removed"]
+        }
+        for snapshot in (before, after)
+    ]
+    original, modified = offer_states
+    return [
+        {"offer_id": offer_id, "before": original.get(offer_id), "after": modified.get(offer_id)}
+        for offer_id in dict.fromkeys([*original, *modified])
+        if original.get(offer_id) != modified.get(offer_id)
+    ]
+
+
 def editor_view(edit: StreamEdit | None, live: list[dict]) -> dict:
-    dirty = edit is not None and edit.draft is not None
+    version = edit.version if edit is not None else 0
+    if edit is None or edit.draft is None:
+        return {
+            "version": version,
+            "dirty": False,
+            "stale": False,
+            "offers": visible_rows(edit, live),
+        }
+
     current = signature(live)
+    already_applied = edit.base != current and signature(edit.draft) == current
+    stale = edit.base != current and not already_applied
+    baseline = draft_baseline(edit, live, current)
     return {
-        "version": edit.version if edit is not None else 0,
-        "dirty": dirty,
-        "stale": bool(dirty and edit.base != current and signature(edit.draft) != current),
-        "offers": edit.draft if dirty else visible_rows(edit, live),
+        "version": version,
+        "dirty": True,
+        "stale": stale,
+        "offers": edit.draft,
+        "preview": {
+            "baseline_known": baseline is not None,
+            "already_applied": already_applied,
+            "changes": offer_changes(
+                baseline if baseline is not None else live, edit.draft, include_pins=True
+            ),
+            "external_changes": offer_changes(baseline, live, include_pins=False)
+            if stale and baseline is not None
+            else [],
+        },
     }
 
 
@@ -141,11 +196,17 @@ class Editor:
             edit = StreamEdit(tracker=self.scope, campaign_id=campaign_id, stream_id=stream_id)
             self.db.add(edit)
         if edit.draft is not None and edit.base != base:
-            raise AppError(
-                409,
+            raise DraftConflict(
                 "Офферы изменились в Keitaro. Примените уже отправленный черновик или отмените его.",
+                editor_view(edit, live),
             )
-        rows = deepcopy(edit.draft) if edit.draft is not None else visible_rows(edit, live)
+        if edit.draft is None:
+            rows = visible_rows(edit, live)
+            edit.base_offers = deepcopy(rows)
+        else:
+            rows = deepcopy(edit.draft)
+            if edit.base_offers is None:
+                edit.base_offers = draft_baseline(edit, live, base)
         change_rows(self.tracker, rows, change)
         edit.base = base
         edit.draft = rows
@@ -162,8 +223,9 @@ class Editor:
         desired = signature(edit.draft)
         current = signature(live)
         if current != desired and current != edit.base:
-            raise AppError(
-                409, "Офферы изменились в Keitaro. Отмените черновик и повторите правки."
+            raise DraftConflict(
+                "Офферы изменились в Keitaro. Отмените черновик и повторите правки.",
+                editor_view(edit, live),
             )
 
         edit.version += 1
@@ -191,6 +253,7 @@ class Editor:
         edit.published = edit.draft
         edit.published_signature = desired
         edit.base = None
+        edit.base_offers = None
         edit.draft = None
         self.db.commit()
         return editor_view(edit, live)
@@ -200,6 +263,7 @@ class Editor:
         self.expect_version(edit, version)
         if edit is not None and edit.draft is not None:
             edit.base = None
+            edit.base_offers = None
             edit.draft = None
             self.db.commit()
         return editor_view(edit, live_offers(stream))

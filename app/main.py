@@ -24,7 +24,7 @@ from app.campaigns import (
 from app.config import Settings
 from app.database import StreamEdit, make_sessions
 from app.demo import DemoKeitaro
-from app.editor import DraftChange, Editor, editor_view, live_offers
+from app.editor import DraftChange, DraftConflict, Editor, editor_view, live_offers
 from app.errors import AppError
 from app.tracker import Keitaro
 
@@ -67,6 +67,10 @@ def create_app(
     @app.exception_handler(AppError)
     async def handle_app_error(_: Request, error: AppError):
         return JSONResponse({"detail": error.message}, status_code=error.status)
+
+    @app.exception_handler(DraftConflict)
+    async def handle_draft_conflict(_: Request, error: DraftConflict):
+        return JSONResponse({"detail": error.message, "editor": error.view}, status_code=409)
 
     @app.exception_handler(IntegrityError)
     @app.exception_handler(StaleDataError)

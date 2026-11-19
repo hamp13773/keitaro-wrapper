@@ -115,9 +115,15 @@ def test_failed_second_flow_archives_incomplete_campaign(environment):
 def test_editor_draft_rounds_publishes_restores_and_cancels(client, environment):
     _, demo = environment
     before = ok(client.get(EDITOR))
+    assert "preview" not in before
     draft = change(client, before, "add", 104)
     assert shares(draft) == {101: 25, 102: 25, 103: 25, 104: 25}
+    assert [
+        (row["offer_id"], row["before"]["share"] if row["before"] else None, row["after"]["share"])
+        for row in draft["preview"]["changes"]
+    ] == [(101, 34, 25), (102, 33, 25), (103, 33, 25), (104, None, 25)]
     draft = change(client, draft, "pin", 101, share=25)
+    assert draft["preview"]["changes"][0]["after"]["pinned"] == 25
     draft = change(client, draft, "remove", 104)
     assert shares(draft) == {101: 25, 102: 38, 103: 37, 104: 0}
     assert [(row["offer_id"], row["share"]) for row in demo.streams[2]["offers"]] == [
@@ -127,6 +133,7 @@ def test_editor_draft_rounds_publishes_restores_and_cancels(client, environment)
     ]
     published = ok(client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]}))
     assert published["dirty"] is False
+    assert "preview" not in published
     assert shares(published) == shares(draft)
     assert [(row["offer_id"], row["share"]) for row in demo.streams[2]["offers"]] == [
         (101, 25),
@@ -163,11 +170,28 @@ def test_editor_rejects_outdated_versions_and_external_edits(client, environment
     assert stale.status_code == 409
     demo.streams[2]["offers"][0]["share"] = 42
     demo.streams[2]["offers"][1]["share"] = 25
-    assert ok(client.get(EDITOR))["stale"] is True
-    assert (
-        client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]}).status_code
-        == 409
-    )
+    response = client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]})
+    assert response.status_code == 409
+    conflict = response.json()["editor"]
+    assert conflict == ok(client.get(EDITOR))
+    assert conflict["stale"] is True
+    assert conflict["preview"]["changes"][0] == {
+        "offer_id": 101,
+        "before": {"share": 34, "state": "active", "pinned": None},
+        "after": None,
+    }
+    assert conflict["preview"]["external_changes"] == [
+        {
+            "offer_id": 101,
+            "before": {"share": 34, "state": "active"},
+            "after": {"share": 42, "state": "active"},
+        },
+        {
+            "offer_id": 102,
+            "before": {"share": 33, "state": "active"},
+            "after": {"share": 25, "state": "active"},
+        },
+    ]
     current = ok(client.post(f"{EDITOR}/draft/cancel", json={"version": draft["version"]}))
     assert current["dirty"] is False
     assert shares(current)[101] == 42
@@ -179,6 +203,26 @@ def test_draft_survives_app_restart(environment):
         draft = change(client, ok(client.get(EDITOR)), "remove", 102)
     with TestClient(create_app(settings, httpx.MockTransport(demo.handle))) as client:
         assert ok(client.get(EDITOR)) == draft
+
+
+def test_migrated_draft_uses_live_values_if_original_snapshot_is_unavailable(client, environment):
+    _, demo = environment
+    original = change(client, ok(client.get(EDITOR)), "add", 104)
+    config = Config("alembic.ini")
+    command.downgrade(config, "0001_stream_edits")
+    command.upgrade(config, "head")
+
+    assert ok(client.get(EDITOR)) == original
+    demo.streams[2]["offers"][0]["share"] = 42
+    demo.streams[2]["offers"][1]["share"] = 25
+    migrated = ok(client.get(EDITOR))
+    assert migrated["stale"] is True
+    assert migrated["offers"] == original["offers"]
+    preview = migrated["preview"]
+    assert preview["baseline_known"] is False
+    assert preview["external_changes"] == []
+    assert preview["changes"][0]["before"]["share"] == 42
+    assert preview["changes"][0]["after"]["share"] == 25
 
 
 def test_retry_after_lost_publish_response_uses_persisted_remote_state(environment):
@@ -198,7 +242,9 @@ def test_retry_after_lost_publish_response_uses_persisted_remote_state(environme
         path = f"{EDITOR}/draft/publish"
         body = {"version": draft["version"]}
         assert client.post(path, json=body).status_code == 504
-        assert ok(client.get(EDITOR))["stale"] is False
+        lost = ok(client.get(EDITOR))
+        assert lost["stale"] is False
+        assert lost["preview"]["already_applied"] is True
         published = ok(client.post(path, json=body))
         assert puts == 1
         assert published["dirty"] is False

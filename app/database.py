@@ -14,6 +14,7 @@ class StreamEdit(Base):
     stream_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     base: Mapped[str | None] = mapped_column(String(64))
+    base_offers: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
     draft: Mapped[list | None] = mapped_column(JSON(none_as_null=True))
     published_signature: Mapped[str | None] = mapped_column(String(64))
     published: Mapped[list | None] = mapped_column(JSON(none_as_null=True))

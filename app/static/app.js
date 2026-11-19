@@ -39,7 +39,9 @@ async function api(path, data) {
     const message = Array.isArray(body.detail)
       ? body.detail.map((issue) => issue.msg.replace(/^Value error, /, '')).join(' ')
       : body.detail;
-    throw new Error(message || `Запрос завершился ошибкой (${response.status}).`);
+    const error = new Error(message || `Запрос завершился ошибкой (${response.status}).`);
+    error.editor = body.editor;
+    throw error;
   }
   return body;
 }
@@ -280,15 +282,57 @@ function renderOffers(context) {
   target.append(tape);
 
   const notice = node('p', { className: 'notice', role: 'status' });
-  const text = context.notice || (data.stale
-    ? 'Офферы изменились в Keitaro. Отмените черновик, затем повторите правки.'
-    : data.dirty && !active.length ? 'После применения в потоке не останется активных офферов.' : '');
+  let text = context.notice;
+  if (data.stale) text = 'Офферы изменились в Keitaro. Отмените черновик, затем повторите правки.';
+  else if (data.preview?.already_applied) text = 'Keitaro уже сохранил эти офферы и доли. Нажмите «Применить в Keitaro», чтобы завершить сохранение черновика.';
+  else if (data.dirty && !active.length) text = 'После применения в потоке не останется активных офферов.';
   setNotice(notice, text, data.stale);
   target.append(notice);
+  if (data.preview) target.append(renderPreview(data.preview, data.stale));
   if (data.offers.length) target.append(renderOfferTable(context, colors));
   else target.append(node('p', { className: 'empty' }, 'В этом потоке пока нет офферов.'));
   target.append(renderAddOffer(context));
   paintStats(context);
+}
+
+function renderPreview(preview, stale) {
+  const panel = node('section', { className: 'change-preview', 'aria-label': 'Предпросмотр изменений' });
+  panel.append(node('h3', {}, 'Предпросмотр изменений'));
+  if (!preview.baseline_known) {
+    panel.append(node('p', { className: 'stats-label' }, 'Для этого черновика доступно сравнение с текущими настройками Keitaro.'));
+  }
+  if (preview.changes.length) {
+    panel.append(renderChanges(preview.changes, preview.baseline_known ? 'Было' : 'Сейчас в Keitaro', stale ? 'Черновик' : 'Станет'));
+  } else {
+    const reference = preview.baseline_known ? 'с исходными настройками' : 'с текущими настройками Keitaro';
+    panel.append(node('p', { className: 'stats-label' }, `Настройки офферов в черновике совпадают ${reference}.`));
+  }
+  if (preview.external_changes.length) {
+    panel.append(node('h4', {}, 'Что изменилось в Keitaro'),
+      renderChanges(preview.external_changes, 'Было', 'Сейчас в Keitaro'));
+  }
+  return panel;
+}
+
+function renderChanges(changes, beforeLabel, afterLabel) {
+  const head = node('thead', {}, node('tr', {}, ...['Оффер', beforeLabel, afterLabel].map(
+    (title) => node('th', { scope: 'col' }, title))));
+  const body = node('tbody', {}, ...changes.map(({ offer_id: id, before, after }) => {
+    const offer = node('th', { scope: 'row' }, catalogName('offers', id));
+    if (!before || !after) {
+      offer.append(node('small', { className: before ? 'change-removed' : 'change-added' }, before ? 'Удаление' : 'Добавление'));
+    }
+    return node('tr', {}, offer, renderChangeValue(before), renderChangeValue(after));
+  }));
+  return node('div', { className: 'change-table-wrap' }, node('table', { className: 'change-table' }, head, body));
+}
+
+function renderChangeValue(value) {
+  if (!value) return node('td', { className: 'muted' }, node('span', { 'aria-hidden': 'true' }, '—'), node('span', { className: 'sr-only' }, 'Нет в потоке'));
+  const cell = node('td', {}, `${value.share}%`);
+  if (value.state !== 'active') cell.append(node('small', { className: 'muted' }, 'Выключен'));
+  else if (value.pinned != null) cell.append(node('small', { className: 'muted' }, 'Закреплено'));
+  return cell;
 }
 
 function renderOfferTable(context, colors) {
@@ -375,7 +419,13 @@ async function mutate(context, suffix, body = {}) {
     context.notice = suffix.endsWith('publish') ? 'Офферы и доли подтверждены в Keitaro.' : '';
     renderOffers(context);
   } catch (error) {
-    setNotice(context.target.querySelector('.notice'), error.message, true);
+    if (error.editor) {
+      context.data = error.editor;
+      context.notice = '';
+      renderOffers(context);
+    } else {
+      setNotice(context.target.querySelector('.notice'), error.message, true);
+    }
   } finally {
     context.busy = false;
     for (const input of disabled) input.disabled = false;

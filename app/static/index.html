@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Keitaro Wrapper</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="#" aria-label="Keitaro Wrapper, к списку кампаний">
+      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      Keitaro <span>Wrapper</span>
+    </a>
+    <div class="mast-actions"><span class="environment" id="environment" hidden></span><a href="/docs">API</a></div>
+  </header>
+  <div class="workspace">
+    <aside class="sidebar" aria-labelledby="campaigns-title">
+      <div class="sidebar-head">
+        <h2 id="campaigns-title">Кампании</h2>
+        <a class="button primary" href="#new" id="create-link">Новая кампания</a>
+        <label class="search"><span class="sr-only">Поиск кампании</span><input id="campaign-search" type="search" placeholder="Поиск по имени или ID"></label>
+      </div>
+      <nav id="campaign-list" aria-label="Список кампаний"><p class="muted">Загружаем кампании…</p></nav>
+    </aside>
+    <main id="main" tabindex="-1" aria-live="polite"><p class="muted">Загружаем рабочую область…</p></main>
+  </div>
+
+  <template id="create-template">
+    <section class="page-heading">
+      <h1>Новая кампания</h1>
+      <p>Настройте два потока и выберите, куда направлять трафик.</p>
+    </section>
+    <div class="create-grid">
+      <form id="campaign-form" class="sheet">
+        <h2>Параметры кампании</h2>
+        <label>Название
+          <span class="prefixed"><span id="name-prefix"></span><input name="name" required maxlength="100" placeholder="spring-launch" autocomplete="off"></span>
+        </label>
+        <div class="form-pair">
+          <label>Гео-код<input name="country" required maxlength="2" pattern="[A-Za-z]{2}" placeholder="PL" autocapitalize="characters" autocomplete="off"></label>
+          <label>Оффер<select name="offer_id" required></select></label>
+        </div>
+        <div class="form-pair">
+          <label>Домен<select name="domain_id" required></select></label>
+          <label>Группа<select name="group_id" required></select></label>
+        </div>
+        <label>Источник трафика<select name="traffic_source_id" required></select></label>
+        <p class="notice" id="create-message" role="status" hidden></p>
+        <div class="form-actions"><button class="primary" type="submit">Создать кампанию</button></div>
+      </form>
+      <section class="sheet route-preview" aria-labelledby="route-title">
+        <h2 id="route-title">Порядок маршрутизации</h2>
+        <ol class="preview-list">
+          <li><span class="route-number">1</span><div><strong id="preview-country">Выбранная страна</strong><p>HTTP-редирект на Google</p></div></li>
+          <li><span class="route-number">2</span><div><strong>Остальной трафик</strong><p id="preview-offer">100% на выбранный оффер</p></div></li>
+        </ol>
+      </section>
+    </div>
+  </template>
+
+  <template id="editor-template">
+    <section class="page-heading editor-heading">
+      <div><p id="campaign-state" class="state-line"></p><h1 id="campaign-name"></h1><p id="campaign-meta"></p></div>
+      <div class="page-actions"><button id="refresh-campaign" class="secondary">Обновить из Keitaro</button><a id="open-keitaro" class="button secondary" target="_blank" rel="noreferrer" hidden>Открыть в Keitaro ↗</a></div>
+    </section>
+    <section class="flow-section" aria-labelledby="flow-title">
+      <h2 id="flow-title">Потоки</h2>
+      <div id="flows" class="flows"></div>
+    </section>
+    <section id="offers-panel" class="sheet offers-sheet" aria-label="Редактор офферов"></section>
+  </template>
+</body>
+</html>

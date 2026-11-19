@@ -3,6 +3,7 @@ const list = document.querySelector('#campaign-list');
 const search = document.querySelector('#campaign-search');
 const createLink = document.querySelector('#create-link');
 const numbers = new Intl.NumberFormat('ru-RU');
+const historyDates = new Intl.DateTimeFormat('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
 
 const state = {
   campaigns: [], config: null, catalogs: null, catalogPromise: null,
@@ -232,7 +233,12 @@ async function renderCampaign(campaignId, view, selectedId = null) {
       const [data] = await Promise.all([api(path), catalogs]);
       if (view !== state.view || panelView !== activePanel) return;
       context.data = data;
-      panel.replaceChildren(target);
+      context.history = node('details', { className: 'publication-history' },
+        node('summary', {}, 'История применений'), node('div', { className: 'history-body' }));
+      context.history.addEventListener('toggle', () => {
+        if (context.history.open) loadHistory(context);
+      });
+      panel.replaceChildren(target, context.history);
       renderOffers(context);
       api(`${path}/stats`).then((stats) => {
         context.stats = stats;
@@ -335,6 +341,57 @@ function renderChangeValue(value) {
   return cell;
 }
 
+async function loadHistory(context, beforeId = null) {
+  const body = context.history.querySelector('.history-body');
+  const request = (context.historyRequest ?? 0) + 1;
+  context.historyRequest = request;
+  if (beforeId === null) body.replaceChildren(node('p', { className: 'muted' }, 'Загружаем историю…'));
+  const more = body.querySelector('.history-more');
+  if (more) more.disabled = true;
+  const query = beforeId === null ? '' : `?before_id=${beforeId}`;
+  try {
+    const page = await api(`${context.path}/history${query}`);
+    if (request !== context.historyRequest || !body.isConnected) return;
+    if (beforeId === null) {
+      if (!page.entries.length) {
+        body.replaceChildren(node('p', { className: 'muted' }, 'После применения изменений здесь появится история.'));
+        return;
+      }
+      const restore = page.restore;
+      const action = restore.reason
+        ? node('p', { className: 'stats-label' }, restore.reason)
+        : button('Вернуть предыдущее распределение', 'secondary',
+          () => mutate(context, `/history/${restore.id}/restore`));
+      body.replaceChildren(action, node('ol', { className: 'history-entries' }));
+    }
+    const records = body.querySelector('.history-entries');
+    for (const entry of page.entries) {
+      const time = node('time', { datetime: entry.applied_at }, historyDates.format(new Date(entry.applied_at)));
+      const detail = node('details', { className: 'history-record' }, node('summary', {}, time));
+      if (entry.id === page.restore?.id) detail.open = true;
+      detail.append(entry.changes
+        ? renderChanges(entry.changes, 'Было', 'Применено')
+        : node('p', { className: 'stats-label' }, 'Снимок состояния до применения недоступен.'));
+      records.append(node('li', {}, detail));
+    }
+    body.querySelector('.history-error')?.remove();
+    more?.remove();
+    if (page.next_before_id !== null) {
+      body.append(button('Показать ещё', 'secondary history-more', () => loadHistory(context, page.next_before_id)));
+    }
+  } catch (error) {
+    if (request !== context.historyRequest || !body.isConnected) return;
+    const notice = node('p', { className: 'notice error history-error', role: 'status' }, error.message);
+    body.querySelector('.history-error')?.remove();
+    if (more) {
+      more.disabled = false;
+      body.append(notice);
+    } else {
+      body.replaceChildren(notice, button('Повторить', 'secondary', () => loadHistory(context)));
+    }
+  }
+}
+
 function renderOfferTable(context, colors) {
   const titles = [['Оффер', ''], ['Доля, %', 'number'], ['Клики', 'number stat'], ['Конверсии', 'number stat'], ['Действия', 'row-actions']];
   const head = node('thead', {}, node('tr', {}, ...titles.map(([label, className]) => node('th', { scope: 'col', className }, label))));
@@ -412,12 +469,16 @@ function paintStats({ stats, statsFailed, target }) {
 async function mutate(context, suffix, body = {}) {
   if (context.busy) return;
   context.busy = true;
-  const disabled = context.target.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled)');
+  const controls = 'button:not(:disabled), input:not(:disabled), select:not(:disabled)';
+  const disabled = [...context.target.querySelectorAll(controls), ...context.history.querySelectorAll(controls)];
   for (const input of disabled) input.disabled = true;
   try {
     context.data = await api(context.path + suffix, { ...body, version: context.data.version });
     context.notice = suffix.endsWith('publish') ? 'Офферы и доли подтверждены в Keitaro.' : '';
+    const restoring = suffix.startsWith('/history/');
+    if (restoring) context.notice = 'Предыдущее распределение подготовлено в черновике.';
     renderOffers(context);
+    if (restoring) context.target.querySelector('.change-preview')?.scrollIntoView({ block: 'nearest' });
   } catch (error) {
     if (error.editor) {
       context.data = error.editor;
@@ -429,6 +490,7 @@ async function mutate(context, suffix, body = {}) {
   } finally {
     context.busy = false;
     for (const input of disabled) input.disabled = false;
+    if (context.history.open && context.history.isConnected) loadHistory(context);
   }
 }
 

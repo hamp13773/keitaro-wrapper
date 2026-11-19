@@ -1,15 +1,19 @@
 import json
 from copy import deepcopy
+from datetime import UTC
 from hashlib import sha256
 from typing import Annotated, Literal
 
 from pydantic import Field, PositiveInt, model_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.campaigns import VersionInput, require_offer
-from app.database import StreamEdit
+from app.database import StreamEdit, StreamPublication
 from app.errors import AppError
 from app.tracker import Keitaro
+
+HISTORY_PAGE_SIZE = 20
 
 
 class DraftChange(VersionInput):
@@ -117,6 +121,33 @@ def editor_view(edit: StreamEdit | None, live: list[dict]) -> dict:
     }
 
 
+def publication_view(publication: StreamPublication) -> dict:
+    applied_at = publication.applied_at
+    if applied_at.tzinfo is None:
+        applied_at = applied_at.replace(tzinfo=UTC)
+    return {
+        "id": publication.id,
+        "applied_at": applied_at.isoformat(),
+        "changes": offer_changes(
+            publication.before_offers, publication.after_offers, include_pins=True
+        )
+        if publication.before_offers is not None
+        else None,
+    }
+
+
+def restore_blocker(
+    edit: StreamEdit | None, live: list[dict], publication: StreamPublication
+) -> str | None:
+    if edit is None or publication.before_offers is None:
+        return "Для этого применения недоступен снимок предыдущего распределения."
+    if edit.draft is not None:
+        return "Примените или отмените открытый черновик перед возвратом."
+    if signature(live) != signature(publication.after_offers):
+        return "После последнего применения офферы изменились в Keitaro. Возврат заблокирован."
+    return None
+
+
 def recalculate(rows: list[dict]) -> None:
     active = [row for row in rows if not row["removed"] and row["state"] == "active"]
     if not active:
@@ -187,6 +218,62 @@ class Editor:
                 409, "Черновик изменился. Обновите поток, чтобы загрузить текущую версию."
             )
 
+    def publications(self, campaign_id: int, stream_id: int):
+        return (
+            select(StreamPublication)
+            .where(
+                StreamPublication.tracker == self.scope,
+                StreamPublication.campaign_id == campaign_id,
+                StreamPublication.stream_id == stream_id,
+            )
+            .order_by(StreamPublication.id.desc())
+        )
+
+    def history(self, campaign_id: int, stream_id: int, before_id: int | None) -> dict:
+        stream, edit = self.read(campaign_id, stream_id)
+        query = self.publications(campaign_id, stream_id)
+        if before_id is not None:
+            query = query.where(StreamPublication.id < before_id)
+        records = self.db.scalars(query.limit(HISTORY_PAGE_SIZE + 1)).all()
+        page = records[:HISTORY_PAGE_SIZE]
+        restore = None
+        if page and before_id is None:
+            restore = {
+                "id": page[0].id,
+                "reason": restore_blocker(edit, live_offers(stream), page[0]),
+            }
+        return {
+            "entries": [publication_view(record) for record in page],
+            "restore": restore,
+            "next_before_id": page[-1].id if len(records) > HISTORY_PAGE_SIZE else None,
+        }
+
+    def restore(self, campaign_id: int, stream_id: int, publication_id: int, version: int) -> dict:
+        stream, edit = self.read(campaign_id, stream_id)
+        self.expect_version(edit, version)
+        latest = self.db.scalar(self.publications(campaign_id, stream_id).limit(1))
+        if latest is None or latest.id != publication_id:
+            raise AppError(409, "Возврат доступен для последнего применения в этом потоке.")
+        live = live_offers(stream)
+        reason = restore_blocker(edit, live, latest)
+        if reason is not None:
+            raise DraftConflict(reason, editor_view(edit, live))
+
+        active_ids = {row["offer_id"] for row in live if row["state"] == "active"}
+        for row in latest.before_offers:
+            if (
+                row["state"] == "active"
+                and not row["removed"]
+                and row["offer_id"] not in active_ids
+            ):
+                require_offer(self.tracker, row["offer_id"])
+
+        edit.base = signature(live)
+        edit.base_offers = visible_rows(edit, live)
+        edit.draft = deepcopy(latest.before_offers)
+        self.db.commit()
+        return editor_view(edit, live)
+
     def change(self, campaign_id: int, stream_id: int, change: DraftChange) -> dict:
         stream, edit = self.read(campaign_id, stream_id)
         self.expect_version(edit, change.version)
@@ -228,6 +315,7 @@ class Editor:
                 editor_view(edit, live),
             )
 
+        before_offers = draft_baseline(edit, live, current)
         edit.version += 1
         self.db.flush()
         if current != desired:
@@ -250,6 +338,16 @@ class Editor:
                     "Keitaro вернул другие доли или офферы. Обновите поток и проверьте результат.",
                 )
 
+        if before_offers is None or offer_changes(before_offers, edit.draft, include_pins=True):
+            self.db.add(
+                StreamPublication(
+                    tracker=self.scope,
+                    campaign_id=campaign_id,
+                    stream_id=stream_id,
+                    before_offers=before_offers,
+                    after_offers=edit.draft,
+                )
+            )
         edit.published = edit.draft
         edit.published_signature = desired
         edit.base = None

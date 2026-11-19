@@ -12,6 +12,7 @@ from app.main import create_app
 from app.tracker import GOOGLE_URL
 
 EDITOR = "/api/campaigns/1/streams/2"
+HISTORY = f"{EDITOR}/history"
 CREATE = {
     "name": "test-summer",
     "country": "de",
@@ -225,6 +226,82 @@ def test_migrated_draft_uses_live_values_if_original_snapshot_is_unavailable(cli
     assert preview["changes"][0]["after"]["share"] == 25
 
 
+def test_publication_history_restores_previous_distribution_through_draft(client, environment):
+    _, demo = environment
+    assert ok(client.get(HISTORY))["entries"] == []
+    draft = change(client, ok(client.get(EDITOR)), "pin", 101, share=34)
+    pinned = ok(client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]}))
+    removed = change(client, pinned, "remove", 101)
+    published = ok(client.post(f"{EDITOR}/draft/publish", json={"version": removed["version"]}))
+
+    history = ok(client.get(HISTORY))
+    newest, older = history["entries"]
+    assert newest["applied_at"].endswith("+00:00")
+    assert history["restore"] == {"id": newest["id"], "reason": None}
+    assert newest["changes"][0] == {
+        "offer_id": 101,
+        "before": {"share": 34, "state": "active", "pinned": 34},
+        "after": None,
+    }
+    older_rejected = client.post(
+        f"{HISTORY}/{older['id']}/restore", json={"version": published["version"]}
+    )
+    assert older_rejected.status_code == 409
+
+    path = f"{HISTORY}/{newest['id']}/restore"
+    restored = ok(client.post(path, json={"version": published["version"]}))
+    assert restored["dirty"] is True
+    assert shares(restored) == {101: 34, 102: 33, 103: 33}
+    assert restored["preview"]["changes"][-1]["after"]["pinned"] == 34
+    assert 101 not in [row["offer_id"] for row in demo.streams[2]["offers"]]
+    assert len(ok(client.get(HISTORY))["entries"]) == 2
+    assert client.post(path, json={"version": restored["version"]}).status_code == 409
+
+    done = ok(client.post(f"{EDITOR}/draft/publish", json={"version": restored["version"]}))
+    assert done["dirty"] is False
+    assert next(row for row in demo.streams[2]["offers"] if row["offer_id"] == 101)["share"] == 34
+    assert len(ok(client.get(HISTORY))["entries"]) == 3
+
+
+def test_external_edits_block_restoration_and_subsequent_application(client, environment):
+    _, demo = environment
+    draft = change(client, ok(client.get(EDITOR)), "add", 104)
+    published = ok(client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]}))
+    entry = ok(client.get(HISTORY))["entries"][0]
+    restore_path = f"{HISTORY}/{entry['id']}/restore"
+    demo.streams[2]["offers"][0]["share"] = 26
+    demo.streams[2]["offers"][1]["share"] = 24
+    assert "изменились в Keitaro" in ok(client.get(HISTORY))["restore"]["reason"]
+    assert client.post(restore_path, json={"version": published["version"]}).status_code == 409
+    assert ok(client.get(EDITOR))["dirty"] is False
+
+    demo.streams[2]["offers"][0]["share"] = 25
+    demo.streams[2]["offers"][1]["share"] = 25
+    restored = ok(client.post(restore_path, json={"version": published["version"]}))
+    demo.streams[2]["offers"][0]["share"] = 26
+    demo.streams[2]["offers"][1]["share"] = 24
+    blocked = client.post(f"{EDITOR}/draft/publish", json={"version": restored["version"]})
+    assert blocked.status_code == 409
+    assert blocked.json()["editor"]["stale"] is True
+    assert demo.streams[2]["offers"][0]["share"] == 26
+    assert len(ok(client.get(HISTORY))["entries"]) == 1
+
+
+def test_history_paginates_from_latest_without_repeats(client):
+    view = ok(client.get(EDITOR))
+    for _ in range(11):
+        for action, fields in (("pin", {"share": 34}), ("unpin", {})):
+            draft = change(client, view, action, 101, **fields)
+            view = ok(client.post(f"{EDITOR}/draft/publish", json={"version": draft["version"]}))
+    first_page = ok(client.get(HISTORY))
+    second_page = ok(client.get(HISTORY, params={"before_id": first_page["next_before_id"]}))
+    ids = [entry["id"] for page in (first_page, second_page) for entry in page["entries"]]
+    assert ids == sorted(set(ids), reverse=True)
+    assert len(ids) == 22
+    assert second_page["next_before_id"] is None
+    assert second_page["restore"] is None
+
+
 def test_retry_after_lost_publish_response_uses_persisted_remote_state(environment):
     settings, demo = environment
     puts = 0
@@ -245,10 +322,14 @@ def test_retry_after_lost_publish_response_uses_persisted_remote_state(environme
         lost = ok(client.get(EDITOR))
         assert lost["stale"] is False
         assert lost["preview"]["already_applied"] is True
+        assert ok(client.get(HISTORY))["entries"] == []
         published = ok(client.post(path, json=body))
         assert puts == 1
         assert published["dirty"] is False
         assert shares(published) == shares(draft)
+        [entry] = ok(client.get(HISTORY))["entries"]
+        assert entry["changes"][0]["before"]["share"] == 34
+        assert entry["changes"][0]["after"]["share"] == 25
 
 
 def test_prefix_and_flow_ownership_are_enforced(client, environment):
@@ -257,6 +338,7 @@ def test_prefix_and_flow_ownership_are_enforced(client, environment):
     demo.streams[8] = {**demo.streams[2], "id": 8, "campaign_id": 8}
     assert [row["id"] for row in ok(client.get("/api/campaigns"))] == [1]
     assert client.get("/api/campaigns/8").status_code == 404
+    assert client.get("/api/campaigns/8/streams/8/history").status_code == 404
     assert (
         client.post(
             "/api/campaigns/1/streams/8/draft",

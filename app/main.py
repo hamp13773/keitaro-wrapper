@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 import httpx
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi import Path as RoutePath
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +22,7 @@ from app.campaigns import (
     stream_summary,
 )
 from app.config import Settings
-from app.database import StreamEdit, make_sessions
+from app.database import Base, make_sessions
 from app.demo import DemoKeitaro
 from app.editor import DraftChange, DraftConflict, Editor, editor_view, live_offers
 from app.errors import AppError
@@ -44,7 +44,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         try:
-            if not inspect(engine).has_table(StreamEdit.__tablename__):
+            database = inspect(engine)
+            if any(not database.has_table(table.name) for table in Base.metadata.sorted_tables):
                 raise RuntimeError("Сначала примените миграции командой alembic upgrade head.")
             yield
         finally:
@@ -117,6 +118,25 @@ def create_app(
         tracker.campaign(campaign_id)
         tracker.stream(campaign_id, stream_id)
         return tracker.stats(campaign_id, stream_id)
+
+    @app.get("/api/campaigns/{campaign_id}/streams/{stream_id}/history")
+    def stream_history(
+        campaign_id: ResourceId,
+        stream_id: ResourceId,
+        db: Db,
+        before_id: Annotated[int | None, Query(gt=0)] = None,
+    ):
+        return Editor(tracker, db).history(campaign_id, stream_id, before_id)
+
+    @app.post("/api/campaigns/{campaign_id}/streams/{stream_id}/history/{publication_id}/restore")
+    def restore_distribution(
+        campaign_id: ResourceId,
+        stream_id: ResourceId,
+        publication_id: ResourceId,
+        body: VersionInput,
+        db: Db,
+    ):
+        return Editor(tracker, db).restore(campaign_id, stream_id, publication_id, body.version)
 
     @app.post("/api/campaigns/{campaign_id}/streams/{stream_id}/draft")
     def change_draft(campaign_id: ResourceId, stream_id: ResourceId, body: DraftChange, db: Db):
